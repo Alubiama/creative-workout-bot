@@ -35,6 +35,7 @@ EXERCISE_TYPE_NAMES = {
     "pitch": "Питч",
     "frames": "Смешение фреймов",
     "quantity": "Дрель количества",
+    "eval_ideas": "Оценка идей",
 }
 
 MOTIVATION_BY_SCORE = [
@@ -153,10 +154,19 @@ async def receive_answer(message: Message, state: FSMContext) -> None:
 
     await message.answer("...")
 
+    # Для eval_ideas добавляем правильный ответ в контекст оценщика
+    eval_prompt = ex["prompt"]
+    if ex["type"] == "eval_ideas" and ex.get("correct_answer"):
+        eval_prompt = (
+            eval_prompt
+            + f"\n\n[Правильный ответ: {ex['correct_answer'].upper()}. "
+            f"Почему он оригинален: {ex.get('why_original', '')}]"
+        )
+
     eval_result = await evaluate_response(
         exercise_type=ex["type"],
         exercise_level=ex["level"],
-        exercise_prompt=ex["prompt"],
+        exercise_prompt=eval_prompt,
         user_response=user_response,
     )
 
@@ -218,6 +228,42 @@ async def receive_difficulty(callback: CallbackQuery, state: FSMContext) -> None
     if next_idx < total:
         # ── Переход к следующему упражнению ──
         next_ex = exercises[next_idx]
+
+        # Динамическая генерация eval_ideas после первого упражнения
+        if next_ex["type"] == "eval_ideas" and next_ex.get("prompt") is None:
+            await callback.message.answer("⏳ Генерирую следующее упражнение...")
+            from exercises.eval_ideas import generate_exercise as gen_eval_ideas
+            prev_ex = exercises[idx]
+            try:
+                eval_data = await gen_eval_ideas(
+                    prev_prompt=prev_ex["prompt"],
+                    prev_type=prev_ex["type"],
+                    level=next_ex["level"],
+                )
+                next_ex = dict(next_ex)
+                next_ex["prompt"] = eval_data["prompt"]
+                next_ex["correct_answer"] = eval_data["correct_answer"]
+                next_ex["why_original"] = eval_data["why_original"]
+            except Exception as e:
+                logger.error("eval_ideas dynamic generation failed: %s", e)
+                # Фолбэк — не блокируем сессию
+                next_ex = dict(next_ex)
+                next_ex["prompt"] = (
+                    "*Оценка идей*\n\n"
+                    "Три человека ответили на то же задание что и ты.\n"
+                    "Прочитай — и выбери самый оригинальный ответ.\n\n"
+                    "*A.* Стандартный, предсказуемый ответ без усилия.\n\n"
+                    "*B.* Нестандартный, но не выходящий за очевидное.\n\n"
+                    "*C.* Неожиданный угол — связь через нетипичный домен.\n\n"
+                    "Напиши букву (A, B или C) и объясни почему именно этот ответ "
+                    "самый оригинальный. Что делает его неожиданным?"
+                )
+                next_ex["correct_answer"] = "c"
+                next_ex["why_original"] = "Неожиданная связь через нетипичный контекст"
+            exercises = list(exercises)
+            exercises[next_idx] = next_ex
+            await state.update_data(exercises=exercises)
+
         next_name = EXERCISE_TYPE_NAMES.get(next_ex["type"], next_ex["type"])
         await callback.message.answer(
             f"✅ *{idx + 1}/{total} готово* → {next_name}",
