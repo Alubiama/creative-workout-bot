@@ -73,7 +73,7 @@ async def evaluate_response(
         }
 
 
-def format_feedback(eval_result: dict) -> str:
+def format_feedback(eval_result: dict, exercise_type: str | None = None) -> str:
     """Format evaluation result into a readable message."""
     score = eval_result.get("score", "?")
     score_bar = "⬛" * score + "⬜" * (5 - score)
@@ -94,5 +94,28 @@ def format_feedback(eval_result: dict) -> str:
     prof_link = eval_result.get("professional_link", "").strip()
     if prof_link and prof_link != "—":
         lines.append(f"\n🎬 *В работе:* {prof_link}")
+
+    # Подсвечиваем позицию на шкале
+    if exercise_type and isinstance(score, int):
+        from exercises.scales import get_scale
+        scale = get_scale(exercise_type)
+        if scale:
+            rows = scale.split("\n")
+            highlighted = []
+            for row in rows:
+                # Строка заголовка — оставляем как есть
+                if row.startswith("*Шкала"):
+                    highlighted.append(row)
+                    continue
+                # Строка с текущим баллом — добавляем стрелку
+                try:
+                    num = int(row.split("—")[0].strip().split("-")[0].strip().split("+")[0].strip())
+                    if num == score:
+                        highlighted.append(f"→ {row}")
+                        continue
+                except ValueError:
+                    pass
+                highlighted.append(f"  {row}")
+            lines.append("\n\n" + "\n".join(highlighted))
 
     return "\n".join(lines)

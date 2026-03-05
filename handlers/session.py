@@ -14,6 +14,7 @@ from database.queries import (
     save_response, update_progress, update_streak,
 )
 from exercises.registry import select_session_exercises
+from exercises.scales import get_scale
 from llm.evaluator import evaluate_response, format_feedback
 from keyboards.inline import difficulty_keyboard
 from locales.ru import t
@@ -120,6 +121,10 @@ async def _send_exercise(message: Message, ex: dict, idx: int, total: int) -> No
     header = f"*Упражнение {idx + 1} из {total} — {name}*\n\n"
     await message.answer(header + ex["prompt"], parse_mode="Markdown")
 
+    scale = get_scale(ex["type"])
+    if scale:
+        await message.answer(scale, parse_mode="Markdown")
+
 
 # ─── Команды ──────────────────────────────────────────────────────────────────
 
@@ -162,7 +167,10 @@ async def receive_answer(message: Message, state: FSMContext) -> None:
     )
     await state.set_state(SessionStates.waiting_difficulty)
 
-    await message.answer(format_feedback(eval_result), parse_mode="Markdown")
+    await message.answer(
+        format_feedback(eval_result, exercise_type=ex["type"]),
+        parse_mode="Markdown",
+    )
     await message.answer(t("session_ask_difficulty"), reply_markup=difficulty_keyboard())
 
 
