@@ -1,4 +1,4 @@
-"""Session handlers: /deep and /quick commands."""
+"""Session handlers: /deep and /quick — полноценные сессии."""
 import logging
 import time
 
@@ -9,17 +9,46 @@ from aiogram.fsm.context import FSMContext
 
 from states.fsm import SessionStates
 from database.queries import (
-    get_user, ensure_user, get_all_progress, create_session,
-    complete_session, save_response, update_progress, update_streak
+    get_user, ensure_user, get_all_progress,
+    create_session, complete_session,
+    save_response, update_progress, update_streak,
 )
-from exercises.registry import select_exercise, select_round_two, EXERCISE_TYPES
+from exercises.registry import select_session_exercises
 from llm.evaluator import evaluate_response, format_feedback
-from keyboards.inline import difficulty_keyboard, round_two_keyboard
+from keyboards.inline import difficulty_keyboard
 from locales.ru import t
 from config import MODE_DEEP, MODE_QUICK
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+# Deep = 3 упражнения, Quick = 1
+EXERCISES_COUNT = {MODE_DEEP: 3, MODE_QUICK: 1}
+
+EXERCISE_TYPE_NAMES = {
+    "aut": "Альт. применение",
+    "rat": "Удалённые ассоциации",
+    "forced": "Вынужденные связи",
+    "constraints": "Ограничения",
+    "triz": "ТРИЗ",
+    "pitch": "Питч",
+    "frames": "Смешение фреймов",
+    "quantity": "Дрель количества",
+}
+
+MOTIVATION_BY_SCORE = [
+    (4.5, "🔥 Исключительная сессия. Так держать."),
+    (3.5, "💡 Сильная работа — неожиданные связи были."),
+    (2.5, "⚡️ Хорошее начало. В следующий раз копай глубже."),
+    (0.0, "🧠 Мозг разогревается. Главное — не останавливаться."),
+]
+
+
+def _motivation(avg: float) -> str:
+    for threshold, phrase in MOTIVATION_BY_SCORE:
+        if avg >= threshold:
+            return phrase
+    return MOTIVATION_BY_SCORE[-1][1]
 
 
 async def _start_session(message: Message, state: FSMContext, mode: str) -> None:
@@ -33,37 +62,66 @@ async def _start_session(message: Message, state: FSMContext, mode: str) -> None
 
     await state.clear()
 
-    # Load progress for all exercise types
     all_progress = await get_all_progress(user_id)
     progress_map = {p["exercise_type"]: p for p in all_progress}
-
     streak = user.get("streak_days", 0)
-    ex = select_exercise(mode=mode, progress=progress_map)
+    count = EXERCISES_COUNT[mode]
+
+    exercises = select_session_exercises(
+        mode=mode,
+        progress=progress_map,
+        count=count,
+        seed=int(time.time()),
+    )
 
     session_id = await create_session(
         user_id=user_id,
         mode=mode,
-        exercise_type=ex.exercise_type,
-        exercise_level=ex.level,
+        exercise_type=exercises[0].exercise_type,
+        exercise_level=exercises[0].level,
     )
 
-    if mode == MODE_DEEP:
-        header = t("session_start_deep", streak=streak, exercise_type=ex.exercise_type, level=ex.level)
-    else:
-        header = t("session_start_quick", streak=streak, exercise_type=ex.exercise_type, level=ex.level)
+    exercises_data = [
+        {"type": ex.exercise_type, "level": ex.level, "prompt": ex.prompt}
+        for ex in exercises
+    ]
 
     await state.update_data(
         session_id=session_id,
         mode=mode,
-        exercise_type=ex.exercise_type,
-        exercise_level=ex.level,
-        exercise_prompt=ex.prompt,
-        start_time=time.time(),
+        exercises=exercises_data,
+        current_idx=0,
+        results=[],
+        exercise_start_time=time.time(),
     )
     await state.set_state(SessionStates.waiting_answer)
-    await message.answer(header, parse_mode="Markdown")
-    await message.answer(ex.prompt, parse_mode="Markdown")
 
+    # ── Стартовый экран ──
+    icon = "🏠" if mode == MODE_DEEP else "🚇"
+    mode_name = "Глубокая" if mode == MODE_DEEP else "Быстрая"
+    ex_list = "\n".join(
+        f"  {i+1}. {EXERCISE_TYPE_NAMES.get(ex['type'], ex['type'])}"
+        for i, ex in enumerate(exercises_data)
+    )
+    word = "упражнение" if count == 1 else "упражнения"
+    start_text = (
+        f"{icon} *{mode_name} сессия началась*\n"
+        f"🔥 Стрик: {streak} дн.\n\n"
+        f"Сегодня {count} {word}:\n"
+        f"{ex_list}\n\n"
+        "_Поехали._"
+    )
+    await message.answer(start_text, parse_mode="Markdown")
+    await _send_exercise(message, exercises_data[0], idx=0, total=count)
+
+
+async def _send_exercise(message: Message, ex: dict, idx: int, total: int) -> None:
+    name = EXERCISE_TYPE_NAMES.get(ex["type"], ex["type"])
+    header = f"*Упражнение {idx + 1} из {total} — {name}*\n\n"
+    await message.answer(header + ex["prompt"], parse_mode="Markdown")
+
+
+# ─── Команды ──────────────────────────────────────────────────────────────────
 
 @router.message(Command("deep"))
 @router.message(F.text == "🏠 Глубокий")
@@ -77,27 +135,30 @@ async def cmd_quick(message: Message, state: FSMContext) -> None:
     await _start_session(message, state, MODE_QUICK)
 
 
+# ─── Ответ на упражнение ──────────────────────────────────────────────────────
+
 @router.message(SessionStates.waiting_answer)
 async def receive_answer(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
-    user_id = message.from_user.id
-    response_text = message.text or ""
-    elapsed = int(time.time() - data.get("start_time", time.time()))
+    user_response = message.text or ""
+    elapsed = int(time.time() - data.get("exercise_start_time", time.time()))
+    exercises = data["exercises"]
+    idx = data["current_idx"]
+    ex = exercises[idx]
 
-    await message.answer(t("session_thinking"), parse_mode="Markdown")
+    await message.answer("...")
 
     eval_result = await evaluate_response(
-        exercise_type=data["exercise_type"],
-        exercise_level=data["exercise_level"],
-        exercise_prompt=data["exercise_prompt"],
-        user_response=response_text,
+        exercise_type=ex["type"],
+        exercise_level=ex["level"],
+        exercise_prompt=ex["prompt"],
+        user_response=user_response,
     )
 
     await state.update_data(
-        user_response=response_text,
-        llm_score=eval_result["score"],
-        response_time_sec=elapsed,
-        eval_result=eval_result,
+        pending_response=user_response,
+        pending_score=eval_result["score"],
+        pending_elapsed=elapsed,
     )
     await state.set_state(SessionStates.waiting_difficulty)
 
@@ -105,71 +166,81 @@ async def receive_answer(message: Message, state: FSMContext) -> None:
     await message.answer(t("session_ask_difficulty"), reply_markup=difficulty_keyboard())
 
 
+# ─── Оценка сложности ─────────────────────────────────────────────────────────
+
 @router.callback_query(F.data.startswith("difficulty:"), SessionStates.waiting_difficulty)
 async def receive_difficulty(callback: CallbackQuery, state: FSMContext) -> None:
-    difficulty = callback.data.split(":")[1]  # easy | ok | hard
+    difficulty = callback.data.split(":")[1]
     data = await state.get_data()
     user_id = callback.from_user.id
 
+    exercises = data["exercises"]
+    idx = data["current_idx"]
+    ex = exercises[idx]
+    total = len(exercises)
+    score = data.get("pending_score", 3)
+
     await save_response(
         session_id=data["session_id"],
-        user_response=data.get("user_response", ""),
-        llm_score=data.get("llm_score", 3),
+        user_response=data.get("pending_response", ""),
+        llm_score=score,
         user_difficulty=difficulty,
-        response_time_sec=data.get("response_time_sec", 0),
+        response_time_sec=data.get("pending_elapsed", 0),
     )
 
     new_level = await update_progress(
         user_id=user_id,
-        exercise_type=data["exercise_type"],
-        llm_score=data.get("llm_score", 3),
+        exercise_type=ex["type"],
+        llm_score=score,
         user_difficulty=difficulty,
     )
 
-    await update_streak(user_id)
+    results = data.get("results", [])
+    results.append({
+        "type": ex["type"],
+        "score": score,
+        "difficulty": difficulty,
+        "level_up": new_level > ex["level"],
+    })
 
-    # Notify about level up
-    if new_level > data["exercise_level"]:
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+    next_idx = idx + 1
+
+    if next_idx < total:
+        # ── Переход к следующему упражнению ──
+        next_ex = exercises[next_idx]
+        next_name = EXERCISE_TYPE_NAMES.get(next_ex["type"], next_ex["type"])
         await callback.message.answer(
-            f"⬆️ Уровень поднят! *{data['exercise_type']}* → уровень {new_level}",
+            f"✅ *{idx + 1}/{total} готово* → {next_name}",
             parse_mode="Markdown",
         )
-
-    await state.update_data(current_level=data["exercise_level"])
-    await state.set_state(SessionStates.round_two_offer)
-
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(
-        t("session_round_two_offer"),
-        reply_markup=round_two_keyboard(),
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("roundtwo:"), SessionStates.round_two_offer)
-async def receive_round_two(callback: CallbackQuery, state: FSMContext) -> None:
-    choice = callback.data.split(":")[1]
-    data = await state.get_data()
-
-    await callback.message.edit_reply_markup(reply_markup=None)
-
-    if choice == "no":
-        await complete_session(data["session_id"])
-        await state.clear()
-        await callback.message.answer(t("session_done"), parse_mode="Markdown")
-    else:
-        ex = select_round_two(
-            exercise_type=data["exercise_type"],
-            current_level=data.get("current_level", data["exercise_level"]),
-            seed=int(time.time()),
-        )
         await state.update_data(
-            exercise_type=ex.exercise_type,
-            exercise_level=ex.level,
-            exercise_prompt=ex.prompt,
-            start_time=time.time(),
+            current_idx=next_idx,
+            results=results,
+            exercise_start_time=time.time(),
         )
         await state.set_state(SessionStates.waiting_answer)
-        await callback.message.answer(ex.prompt, parse_mode="Markdown")
+        await _send_exercise(callback.message, next_ex, idx=next_idx, total=total)
+
+    else:
+        # ── Финальный экран ──
+        await update_streak(user_id)
+        await complete_session(data["session_id"])
+        await state.clear()
+
+        avg_score = sum(r["score"] for r in results) / len(results)
+
+        lines = ["🎯 *Сессия завершена!*\n\n"]
+        for r in results:
+            name = EXERCISE_TYPE_NAMES.get(r["type"], r["type"])
+            bar = "⬛" * r["score"] + "⬜" * (5 - r["score"])
+            lvl_up = "  ⬆️ уровень" if r["level_up"] else ""
+            lines.append(f"• {name}: {r['score']}/5 {bar}{lvl_up}\n")
+
+        lines.append(f"\n*Средняя: {avg_score:.1f}/5*\n")
+        lines.append(f"\n{_motivation(avg_score)}")
+
+        await callback.message.answer("".join(lines), parse_mode="Markdown")
 
     await callback.answer()
