@@ -1,24 +1,36 @@
 """All database operations."""
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+
+from config import DIFFICULTY_EASY, LEVEL_UP_THRESHOLD, MAX_LEVEL
 from database.db import get_db
-from config import LEVEL_UP_THRESHOLD, MAX_LEVEL, DIFFICULTY_EASY
 
-
-# ─── Users ────────────────────────────────────────────────────────────────────
 
 async def ensure_user(user_id: int, username: str | None = None) -> dict:
     db = await get_db()
-    async with db.execute(
-        "SELECT * FROM users WHERE user_id = ?", (user_id,)
-    ) as cur:
+    async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cur:
         row = await cur.fetchone()
     if row is None:
         await db.execute(
             "INSERT INTO users (user_id, username) VALUES (?, ?)",
             (user_id, username),
         )
+        await db.execute(
+            "INSERT OR IGNORE INTO user_settings (user_id, focus_exercise_type) VALUES (?, NULL)",
+            (user_id,),
+        )
         await db.commit()
-        return {"user_id": user_id, "onboarded": 0, "streak_days": 0, "last_session_date": None}
+        return {
+            "user_id": user_id,
+            "onboarded": 0,
+            "streak_days": 0,
+            "last_session_date": None,
+        }
+
+    await db.execute(
+        "INSERT OR IGNORE INTO user_settings (user_id, focus_exercise_type) VALUES (?, NULL)",
+        (user_id,),
+    )
+    await db.commit()
     return dict(row)
 
 
@@ -36,7 +48,6 @@ async def get_user(user_id: int) -> dict | None:
 
 
 async def update_streak(user_id: int) -> int:
-    """Update streak counter. Returns new streak value."""
     db = await get_db()
     today = date.today().isoformat()
     user = await get_user(user_id)
@@ -45,14 +56,11 @@ async def update_streak(user_id: int) -> int:
 
     last = user.get("last_session_date")
     streak = user.get("streak_days", 0)
-
     if last == today:
-        return streak  # already logged today
+        return streak
 
-    from datetime import timedelta
     yesterday = (date.today() - timedelta(days=1)).isoformat()
     new_streak = (streak + 1) if last == yesterday else 1
-
     await db.execute(
         "UPDATE users SET streak_days = ?, last_session_date = ? WHERE user_id = ?",
         (new_streak, today, user_id),
@@ -60,8 +68,6 @@ async def update_streak(user_id: int) -> int:
     await db.commit()
     return new_streak
 
-
-# ─── Sessions ─────────────────────────────────────────────────────────────────
 
 async def create_session(user_id: int, mode: str, exercise_type: str, exercise_level: int) -> int:
     db = await get_db()
@@ -77,13 +83,9 @@ async def create_session(user_id: int, mode: str, exercise_type: str, exercise_l
 async def complete_session(session_id: int) -> None:
     db = await get_db()
     now = datetime.now().isoformat()
-    await db.execute(
-        "UPDATE sessions SET completed_at = ? WHERE id = ?", (now, session_id)
-    )
+    await db.execute("UPDATE sessions SET completed_at = ? WHERE id = ?", (now, session_id))
     await db.commit()
 
-
-# ─── Responses ────────────────────────────────────────────────────────────────
 
 async def save_response(
     session_id: int,
@@ -91,18 +93,40 @@ async def save_response(
     llm_score: int,
     user_difficulty: str,
     response_time_sec: int,
+    initial_llm_score: int | None = None,
+    appeal_text: str | None = None,
+    appeal_feedback: str | None = None,
+    appeal_decision: str | None = None,
 ) -> None:
     db = await get_db()
     await db.execute(
-        """INSERT INTO responses
-           (session_id, user_response, llm_score, user_difficulty, response_time_sec)
-           VALUES (?,?,?,?,?)""",
-        (session_id, user_response, llm_score, user_difficulty, response_time_sec),
+        """
+        INSERT INTO responses (
+            session_id,
+            user_response,
+            llm_score,
+            user_difficulty,
+            response_time_sec,
+            initial_llm_score,
+            appeal_text,
+            appeal_feedback,
+            appeal_decision
+        ) VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            session_id,
+            user_response,
+            llm_score,
+            user_difficulty,
+            response_time_sec,
+            initial_llm_score,
+            appeal_text,
+            appeal_feedback,
+            appeal_decision,
+        ),
     )
     await db.commit()
 
-
-# ─── Progress ─────────────────────────────────────────────────────────────────
 
 async def get_progress(user_id: int, exercise_type: str) -> dict:
     db = await get_db()
@@ -117,53 +141,50 @@ async def get_progress(user_id: int, exercise_type: str) -> dict:
             (user_id, exercise_type),
         )
         await db.commit()
-        return {"user_id": user_id, "exercise_type": exercise_type, "current_level": 1,
-                "sessions_count": 0, "avg_score": 0, "last_three_difficulties": ""}
+        return {
+            "user_id": user_id,
+            "exercise_type": exercise_type,
+            "current_level": 1,
+            "sessions_count": 0,
+            "avg_score": 0,
+            "last_three_difficulties": "",
+        }
     return dict(row)
 
 
-async def update_progress(
-    user_id: int,
-    exercise_type: str,
-    llm_score: int,
-    user_difficulty: str,
-) -> int:
-    """Update progress and check for level-up. Returns current level."""
+async def update_progress(user_id: int, exercise_type: str, llm_score: int, user_difficulty: str) -> int:
     prog = await get_progress(user_id, exercise_type)
     db = await get_db()
 
     sessions_count = prog["sessions_count"] + 1
-
-    # Rolling average score
     old_avg = prog["avg_score"]
     old_count = prog["sessions_count"]
     new_avg = ((old_avg * old_count) + llm_score) / sessions_count
 
-    # Track last 3 difficulties as CSV
     history = prog["last_three_difficulties"] or ""
-    parts = [p for p in history.split(",") if p]
+    parts = [part for part in history.split(",") if part]
     parts.append(user_difficulty)
-    parts = parts[-3:]  # keep only last 3
+    parts = parts[-3:]
     new_history = ",".join(parts)
 
-    # Level-up logic
     current_level = prog["current_level"]
     if (
         len(parts) >= LEVEL_UP_THRESHOLD
-        and all(p == DIFFICULTY_EASY for p in parts)
+        and all(part == DIFFICULTY_EASY for part in parts)
         and current_level < MAX_LEVEL
     ):
         current_level += 1
-        parts = []  # reset history after level up
         new_history = ""
 
     await db.execute(
-        """UPDATE progress SET
+        """
+        UPDATE progress SET
             sessions_count = ?,
             avg_score = ?,
             current_level = ?,
             last_three_difficulties = ?
-           WHERE user_id = ? AND exercise_type = ?""",
+        WHERE user_id = ? AND exercise_type = ?
+        """,
         (sessions_count, new_avg, current_level, new_history, user_id, exercise_type),
     )
     await db.commit()
@@ -172,14 +193,10 @@ async def update_progress(
 
 async def get_all_progress(user_id: int) -> list[dict]:
     db = await get_db()
-    async with db.execute(
-        "SELECT * FROM progress WHERE user_id = ?", (user_id,)
-    ) as cur:
+    async with db.execute("SELECT * FROM progress WHERE user_id = ?", (user_id,)) as cur:
         rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    return [dict(row) for row in rows]
 
-
-# ─── Incubation ───────────────────────────────────────────────────────────────
 
 async def create_incubation(user_id: int, task_text: str) -> int:
     db = await get_db()
@@ -212,11 +229,67 @@ async def answer_incubation(incubation_id: int, answer_text: str) -> None:
     await db.commit()
 
 
-# ─── Stats ────────────────────────────────────────────────────────────────────
+async def get_focus_exercise_type(user_id: int) -> str | None:
+    db = await get_db()
+    async with db.execute(
+        "SELECT focus_exercise_type FROM user_settings WHERE user_id = ?",
+        (user_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    return row[0] if row and row[0] else None
+
+
+async def set_focus_exercise_type(user_id: int, exercise_type: str) -> None:
+    db = await get_db()
+    await db.execute(
+        "INSERT INTO user_settings (user_id, focus_exercise_type) VALUES (?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET focus_exercise_type = excluded.focus_exercise_type",
+        (user_id, exercise_type),
+    )
+    await db.commit()
+
+
+async def clear_focus_exercise_type(user_id: int) -> None:
+    db = await get_db()
+    await db.execute(
+        "INSERT INTO user_settings (user_id, focus_exercise_type) VALUES (?, NULL) "
+        "ON CONFLICT(user_id) DO UPDATE SET focus_exercise_type = NULL",
+        (user_id,),
+    )
+    await db.commit()
+
+
+async def reset_user_progress(user_id: int) -> None:
+    db = await get_db()
+
+    async with db.execute("SELECT id FROM sessions WHERE user_id = ?", (user_id,)) as cur:
+        session_rows = await cur.fetchall()
+    session_ids = [row[0] for row in session_rows]
+
+    if session_ids:
+        placeholders = ",".join("?" for _ in session_ids)
+        await db.execute(
+            f"DELETE FROM responses WHERE session_id IN ({placeholders})",
+            session_ids,
+        )
+
+    await db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    await db.execute("DELETE FROM progress WHERE user_id = ?", (user_id,))
+    await db.execute("DELETE FROM incubation WHERE user_id = ?", (user_id,))
+    await db.execute(
+        "UPDATE users SET onboarded = 0, streak_days = 0, last_session_date = NULL WHERE user_id = ?",
+        (user_id,),
+    )
+    await db.execute(
+        "INSERT INTO user_settings (user_id, focus_exercise_type) VALUES (?, NULL) "
+        "ON CONFLICT(user_id) DO UPDATE SET focus_exercise_type = NULL",
+        (user_id,),
+    )
+    await db.commit()
+
 
 async def get_stats_summary(user_id: int) -> dict:
     db = await get_db()
-
     async with db.execute(
         "SELECT COUNT(*) as total FROM sessions WHERE user_id = ? AND completed_at IS NOT NULL",
         (user_id,),
@@ -225,55 +298,57 @@ async def get_stats_summary(user_id: int) -> dict:
     total_sessions = row["total"] if row else 0
 
     progress_rows = await get_all_progress(user_id)
-
     user = await get_user(user_id)
     streak = user.get("streak_days", 0) if user else 0
+    focus = await get_focus_exercise_type(user_id)
 
     return {
         "total_sessions": total_sessions,
         "streak": streak,
         "progress": progress_rows,
+        "focus_exercise_type": focus,
     }
 
 
 async def get_weekly_report_data(user_id: int, days: int = 7) -> dict:
-    """Fetch all data for weekly report: sessions + responses + incubations."""
     db = await get_db()
-    from datetime import timedelta
     since = (date.today() - timedelta(days=days)).isoformat()
 
-    # Sessions with responses joined
     async with db.execute(
-        """SELECT s.date, s.mode, s.exercise_type, s.exercise_level,
-                  r.user_response, r.llm_score, r.user_difficulty, r.response_time_sec
-           FROM sessions s
-           LEFT JOIN responses r ON r.session_id = s.id
-           WHERE s.user_id = ? AND s.date >= ?
-           ORDER BY s.date, s.id""",
+        """
+        SELECT s.date, s.mode, s.exercise_type, s.exercise_level,
+               r.user_response, r.llm_score, r.user_difficulty, r.response_time_sec,
+               r.initial_llm_score, r.appeal_decision
+        FROM sessions s
+        LEFT JOIN responses r ON r.session_id = s.id
+        WHERE s.user_id = ? AND s.date >= ?
+        ORDER BY s.date, s.id
+        """,
         (user_id, since),
     ) as cur:
         rows = await cur.fetchall()
-    sessions = [dict(r) for r in rows]
+    sessions = [dict(row) for row in rows]
 
-    # Incubations this week
     async with db.execute(
-        """SELECT task_text, created_at, answered_at, answer_text
-           FROM incubation
-           WHERE user_id = ? AND date(created_at) >= ?
-           ORDER BY created_at""",
+        """
+        SELECT task_text, created_at, answered_at, answer_text
+        FROM incubation
+        WHERE user_id = ? AND date(created_at) >= ?
+        ORDER BY created_at
+        """,
         (user_id, since),
     ) as cur:
         rows = await cur.fetchall()
-    incubations = [dict(r) for r in rows]
+    incubations = [dict(row) for row in rows]
 
-    # Overall progress
     progress = await get_all_progress(user_id)
     user = await get_user(user_id)
-
+    focus = await get_focus_exercise_type(user_id)
     return {
         "sessions": sessions,
         "incubations": incubations,
         "progress": progress,
         "streak": user.get("streak_days", 0) if user else 0,
         "days": days,
+        "focus_exercise_type": focus,
     }

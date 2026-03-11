@@ -21,7 +21,8 @@ async def close_db() -> None:
 
 
 async def _init_schema(db: aiosqlite.Connection) -> None:
-    await db.executescript("""
+    await db.executescript(
+        """
         CREATE TABLE IF NOT EXISTS users (
             user_id     INTEGER PRIMARY KEY,
             username    TEXT,
@@ -54,7 +55,7 @@ async def _init_schema(db: aiosqlite.Connection) -> None:
             exercise_type   TEXT,
             current_level   INTEGER DEFAULT 1,
             sessions_count  INTEGER DEFAULT 0,
-            avg_score       REAL    DEFAULT 0,
+            avg_score       REAL DEFAULT 0,
             last_three_difficulties TEXT DEFAULT '',
             PRIMARY KEY (user_id, exercise_type)
         );
@@ -67,5 +68,24 @@ async def _init_schema(db: aiosqlite.Connection) -> None:
             answered_at TEXT,
             answer_text TEXT
         );
-    """)
+
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id INTEGER PRIMARY KEY,
+            focus_exercise_type TEXT
+        );
+        """
+    )
+
+    await _ensure_column(db, "responses", "initial_llm_score", "INTEGER")
+    await _ensure_column(db, "responses", "appeal_text", "TEXT")
+    await _ensure_column(db, "responses", "appeal_feedback", "TEXT")
+    await _ensure_column(db, "responses", "appeal_decision", "TEXT")
     await db.commit()
+
+
+async def _ensure_column(db: aiosqlite.Connection, table: str, column: str, column_type: str) -> None:
+    async with db.execute(f"PRAGMA table_info({table})") as cur:
+        rows = await cur.fetchall()
+    existing = {row[1] for row in rows}
+    if column not in existing:
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
