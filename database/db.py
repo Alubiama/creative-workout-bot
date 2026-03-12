@@ -80,6 +80,7 @@ async def _init_schema(db: aiosqlite.Connection) -> None:
     await _ensure_column(db, "responses", "appeal_text", "TEXT")
     await _ensure_column(db, "responses", "appeal_feedback", "TEXT")
     await _ensure_column(db, "responses", "appeal_decision", "TEXT")
+    await _ensure_column(db, "responses", "llm_feedback", "TEXT")
     await db.commit()
 
 

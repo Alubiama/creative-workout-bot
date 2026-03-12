@@ -1,4 +1,4 @@
-"""Improved weekly report with full answers and clearer session status."""
+﻿"""Concise weekly report focused on task-by-task learning evidence."""
 import logging
 from datetime import date
 
@@ -23,122 +23,160 @@ EXERCISE_TYPE_NAMES = {
     "eval_ideas": "\u041e\u0446\u0435\u043d\u043a\u0430 \u0438\u0434\u0435\u0439",
 }
 
-DIFFICULTY_LABELS = {
-    "easy": "\u041b\u0435\u0433\u043a\u043e \U0001f634",
-    "ok": "\u041d\u043e\u0440\u043c\u0430\u043b\u044c\u043d\u043e \U0001f610",
-    "hard": "\u0421\u043b\u043e\u0436\u043d\u043e \U0001f525",
-    None: "\u2014",
+MODE_NAMES = {
+    "deep": "\u0413\u043b\u0443\u0431\u043e\u043a\u0438\u0439",
+    "quick": "\u0411\u044b\u0441\u0442\u0440\u044b\u0439",
 }
 
 
-def _indent_block(text: str, prefix: str = "      ") -> str:
-    return "\n".join(f"{prefix}{line}" if line else prefix.rstrip() for line in text.splitlines())
+def _safe(text: str | None) -> str:
+    if not text:
+        return "-"
+    normalized = text.strip()
+    return normalized if normalized else "-"
 
 
-def _session_status(session: dict) -> str:
-    if session.get("llm_score") is None and not session.get("user_response"):
-        return "\u043d\u0435\u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u043e"
-    return "\u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u043e"
+def _bot_answer(session: dict) -> str:
+    feedback = _safe(session.get("llm_feedback"))
+    score = session.get("llm_score")
+    if feedback != "-":
+        if score is None:
+            return feedback
+        return f"{feedback} (\u043e\u0446\u0435\u043d\u043a\u0430: {score}/5)"
+    if score is not None:
+        return f"\u041e\u0446\u0435\u043d\u043a\u0430: {score}/5"
+    return "-"
+
+
+def _appeal_answer(session: dict) -> str:
+    feedback = _safe(session.get("appeal_feedback"))
+    decision = _safe(session.get("appeal_decision"))
+    if feedback == "-" and decision == "-":
+        return "-"
+    if feedback == "-":
+        return f"\u0420\u0435\u0448\u0435\u043d\u0438\u0435: {decision}"
+    if decision == "-":
+        return feedback
+    return f"{feedback} (\u0440\u0435\u0448\u0435\u043d\u0438\u0435: {decision})"
+
+
+def _learning_block(sessions: list[dict]) -> list[str]:
+    scored = [s for s in sessions if s.get("llm_score") is not None]
+    if not scored:
+        return [
+            "\u0424\u0430\u043a\u0442\u043e\u0440 \u043e\u0431\u0443\u0447\u0435\u043d\u0438\u044f:",
+            "- \u0417\u0430 \u043f\u0435\u0440\u0438\u043e\u0434 \u043d\u0435\u0442 \u043e\u0446\u0435\u043d\u0451\u043d\u043d\u044b\u0445 \u043e\u0442\u0432\u0435\u0442\u043e\u0432.",
+        ]
+
+    scores = [int(s["llm_score"]) for s in scored]
+    avg = sum(scores) / len(scores)
+
+    split = max(1, len(scores) // 2)
+    first_part = scores[:split]
+    second_part = scores[split:] if scores[split:] else scores[:split]
+    first_avg = sum(first_part) / len(first_part)
+    second_avg = sum(second_part) / len(second_part)
+    delta = second_avg - first_avg
+
+    if delta > 0.15:
+        trend = "\u0440\u043e\u0441\u0442"
+    elif delta < -0.15:
+        trend = "\u0441\u043f\u0430\u0434"
+    else:
+        trend = "\u0441\u0442\u0430\u0431\u0438\u043b\u044c\u043d\u043e"
+
+    appeals = sum(1 for s in sessions if _safe(s.get("appeal_text")) != "-")
+
+    return [
+        "\u0424\u0430\u043a\u0442\u043e\u0440 \u043e\u0431\u0443\u0447\u0435\u043d\u0438\u044f:",
+        f"- \u041e\u0446\u0435\u043d\u0451\u043d\u043d\u044b\u0445 \u0437\u0430\u0434\u0430\u043d\u0438\u0439: {len(scored)}",
+        f"- \u0421\u0440\u0435\u0434\u043d\u044f\u044f \u043e\u0446\u0435\u043d\u043a\u0430: {avg:.2f}/5",
+        f"- \u0414\u0438\u043d\u0430\u043c\u0438\u043a\u0430 (\u043f\u0435\u0440\u0432\u0430\u044f \u043f\u043e\u043b\u043e\u0432\u0438\u043d\u0430 -> \u0432\u0442\u043e\u0440\u0430\u044f): {first_avg:.2f} -> {second_avg:.2f} ({delta:+.2f}, {trend})",
+        f"- \u0410\u043f\u0435\u043b\u043b\u044f\u0446\u0438\u0439: {appeals}",
+    ]
+
+
+def _metric_guidance(sessions: list[dict]) -> list[str]:
+    scored = [s for s in sessions if s.get("llm_score") is not None]
+    if not scored:
+        return []
+
+    scores = [int(s["llm_score"]) for s in scored]
+    avg = sum(scores) / len(scores)
+    weak = sum(1 for score in scores if score <= 2)
+
+    if avg < 3:
+        step = "Сначала давай две версии ответа: очевидную и неочевидную. В сдачу бери вторую."
+        target = "Цель на следующую сессию: сдвинуть средний балл до 3.0+."
+    elif avg < 4:
+        step = "Добавляй в каждый ответ одно неожиданное ограничение + один рабочий кейс."
+        target = "Цель на следующую сессию: минимум половина ответов на 4/5."
+    else:
+        step = "Удерживай уровень: проверяй каждый ответ на риски и применимость перед отправкой."
+        target = "Цель на следующую сессию: стабильно 4+/5 без просадок."
+
+    return [
+        "",
+        "Как подступиться к метрике:",
+        f"- Слабых ответов (<=2/5): {weak}",
+        f"- Шаг: {step}",
+        f"- {target}",
+    ]
+
+
+def _task_title(session: dict) -> str:
+    mode = MODE_NAMES.get(session.get("mode"), session.get("mode") or "-")
+    ex_name = EXERCISE_TYPE_NAMES.get(session.get("exercise_type"), session.get("exercise_type") or "-")
+    level = session.get("exercise_level")
+    if level:
+        return f"{mode} | {ex_name} | \u0443\u0440.{level}"
+    return f"{mode} | {ex_name}"
+
+
+def _report_sessions(data: dict) -> list[dict]:
+    sessions = data.get("sessions", [])
+    return [
+        s
+        for s in sessions
+        if _safe(s.get("user_response")) != "-"
+        or s.get("llm_score") is not None
+        or _safe(s.get("llm_feedback")) != "-"
+        or _safe(s.get("appeal_text")) != "-"
+        or _safe(s.get("appeal_feedback")) != "-"
+    ]
 
 
 def _build_report_text(data: dict) -> str:
     today = date.today().isoformat()
+    sessions = _report_sessions(data)
+
     lines = [
-        "\u2550\u2550\u2550 WEEKLY REPORT \u2014 Creative Workout Bot \u2550\u2550\u2550",
-        f"\u0414\u0430\u0442\u0430: {today} | \u041f\u0435\u0440\u0438\u043e\u0434: \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 {data['days']} \u0434\u043d\u0435\u0439",
+        "CREATIVE WORKOUT REPORT",
+        f"\u0414\u0430\u0442\u0430 \u043e\u0442\u0447\u0451\u0442\u0430: {today}",
+        f"\u041f\u0435\u0440\u0438\u043e\u0434: \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 {data['days']} \u0434\u043d\u0435\u0439",
         f"\u0421\u0442\u0440\u0438\u043a: {data['streak']} \u0434\u043d.",
+        "",
     ]
 
-    focus = data.get("focus_exercise_type")
-    if focus:
-        lines.append(f"\u0424\u043e\u043a\u0443\u0441-\u0442\u0440\u0435\u043a: {EXERCISE_TYPE_NAMES.get(focus, focus)}")
+    lines.extend(_learning_block(sessions))
+    lines.extend(_metric_guidance(sessions))
     lines.append("")
-
-    sessions = data["sessions"]
-    completed_sessions = [session for session in sessions if session.get("llm_score") is not None]
-    incomplete_sessions = [session for session in sessions if session.get("llm_score") is None]
+    lines.append("\u041f\u043e \u043a\u0430\u0436\u0434\u043e\u043c\u0443 \u0437\u0430\u0434\u0430\u043d\u0438\u044e:")
 
     if not sessions:
-        lines.append("\u0421\u0435\u0441\u0441\u0438\u0439 \u0437\u0430 \u043f\u0435\u0440\u0438\u043e\u0434 \u043d\u0435 \u0431\u044b\u043b\u043e.")
-    else:
-        if completed_sessions:
-            lines.append(f"\u0417\u0410\u0412\u0415\u0420\u0428\u0401\u041d\u041d\u042b\u0415 \u0421\u0415\u0421\u0421\u0418\u0418 ({len(completed_sessions)}):")
-            lines.append("\u2500" * 56)
-            by_date: dict[str, list] = {}
-            for session in completed_sessions:
-                day = session["date"] or "unknown"
-                by_date.setdefault(day, []).append(session)
+        lines.append("- \u0417\u0430 \u043f\u0435\u0440\u0438\u043e\u0434 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445.")
+        return "\n".join(lines)
 
-            for day in sorted(by_date.keys()):
-                lines.append(f"\n\U0001f4c5 {day}")
-                for idx, session in enumerate(by_date[day], start=1):
-                    mode_icon = "\U0001f3e0" if session["mode"] == "deep" else "\U0001f687"
-                    ex_name = EXERCISE_TYPE_NAMES.get(session["exercise_type"], session["exercise_type"])
-                    score = session["llm_score"]
-                    diff = DIFFICULTY_LABELS.get(session["user_difficulty"], "\u2014")
-                    resp_time = f"{session['response_time_sec']}\u0441" if session["response_time_sec"] else "\u2014"
+    for idx, session in enumerate(sessions, start=1):
+        lines.append("")
+        lines.append(f"[{idx}]")
+        lines.append(f"\u0434\u0430\u0442\u0430: {_safe(session.get('date'))}")
+        lines.append(f"\u0437\u0430\u0434\u0430\u043d\u0438\u0435: {_task_title(session)}")
+        lines.append(f"\u043c\u043e\u0439 \u043e\u0442\u0432\u0435\u0442: {_safe(session.get('user_response'))}")
+        lines.append(f"\u043e\u0442\u0432\u0435\u0442 \u0431\u043e\u0442\u0430: {_bot_answer(session)}")
+        lines.append(f"\u0430\u043f\u0435\u043b\u043b\u044f\u0446\u0438\u044f: {_safe(session.get('appeal_text'))}")
+        lines.append(f"\u043e\u0442\u0432\u0435\u0442 \u043d\u0430 \u0430\u043f\u0435\u043b\u043b\u044f\u0446\u0438\u044e: {_appeal_answer(session)}")
 
-                    lines.append(
-                        f"  {idx}. {mode_icon} {ex_name} (\u0443\u0440.{session['exercise_level']}) | "
-                        f"\u041e\u0446\u0435\u043d\u043a\u0430: {score}/5 | {diff} | \u23f1 {resp_time}"
-                    )
-
-                    initial_score = session.get("initial_llm_score")
-                    appeal_decision = session.get("appeal_decision")
-                    if initial_score is not None:
-                        lines.append(f"      \u0418\u0441\u0445\u043e\u0434\u043d\u0430\u044f \u043e\u0446\u0435\u043d\u043a\u0430: {initial_score}/5")
-                    if appeal_decision:
-                        lines.append(f"      \u0410\u043f\u0435\u043b\u043b\u044f\u0446\u0438\u044f: {appeal_decision}")
-
-                    response = session.get("user_response")
-                    if response:
-                        lines.append("      \u041e\u0442\u0432\u0435\u0442:")
-                        lines.append(_indent_block(response))
-                    else:
-                        lines.append("      \u041e\u0442\u0432\u0435\u0442: \u2014")
-
-                    lines.append("")
-
-        if incomplete_sessions:
-            lines.append(f"\u041d\u0415\u0417\u0410\u0412\u0415\u0420\u0428\u0401\u041d\u041d\u042b\u0415 \u041f\u041e\u041f\u042b\u0422\u041a\u0418 ({len(incomplete_sessions)}):")
-            lines.append("\u2500" * 56)
-            for idx, session in enumerate(incomplete_sessions, start=1):
-                mode_icon = "\U0001f3e0" if session["mode"] == "deep" else "\U0001f687"
-                ex_name = EXERCISE_TYPE_NAMES.get(session["exercise_type"], session["exercise_type"])
-                resp_time = f"{session['response_time_sec']}\u0441" if session["response_time_sec"] else "\u2014"
-                lines.append(
-                    f"  {idx}. {mode_icon} {ex_name} (\u0443\u0440.{session['exercise_level']}) | \u23f1 {resp_time} | \u043d\u0435\u0442 \u043e\u0446\u0435\u043d\u043a\u0438 / \u043d\u0435\u0442 \u043e\u0442\u0432\u0435\u0442\u0430"
-                )
-            lines.append("")
-
-    incubations = data["incubations"]
-    if incubations:
-        lines.append("\u0418\u041d\u041a\u0423\u0411\u0410\u0426\u0418\u0418:")
-        lines.append("\u2500" * 56)
-        for idx, incubation in enumerate(incubations, start=1):
-            lines.append(f"  {idx}. \u0417\u0430\u0434\u0430\u0447\u0430:")
-            lines.append(_indent_block(incubation["task_text"]))
-            if incubation["answer_text"]:
-                lines.append("      \u041e\u0442\u0432\u0435\u0442:")
-                lines.append(_indent_block(incubation["answer_text"]))
-            else:
-                lines.append("      \u041e\u0442\u0432\u0435\u0442: \u0435\u0449\u0451 \u043d\u0435 \u0434\u0430\u043d")
-            lines.append("")
-
-    progress = [item for item in data["progress"] if item["sessions_count"] > 0]
-    if progress:
-        lines.append("\u041f\u0420\u041e\u0413\u0420\u0415\u0421\u0421 \u041f\u041e \u0422\u0418\u041f\u0410\u041c:")
-        lines.append("\u2500" * 56)
-        for item in sorted(progress, key=lambda x: x["avg_score"]):
-            name = EXERCISE_TYPE_NAMES.get(item["exercise_type"], item["exercise_type"])
-            lines.append(
-                f"  {name}: \u0443\u0440.{item['current_level']} | "
-                f"\u0441\u0435\u0441\u0441\u0438\u0439 {item['sessions_count']} | \u0441\u0440\u0435\u0434\u043d\u044f\u044f \u043e\u0446\u0435\u043d\u043a\u0430 {item['avg_score']:.1f}"
-            )
-
-    lines.append("")
-    lines.append("\u2550\u2550\u2550 \u041a\u041e\u041d\u0415\u0426 \u041e\u0422\u0427\u0401\u0422\u0410 \u2550\u2550\u2550")
-    lines.append("\u0412 \u044d\u0442\u043e\u043c \u0444\u0430\u0439\u043b\u0435 \u043e\u0442\u0432\u0435\u0442\u044b \u043d\u0435 \u043e\u0431\u0440\u0435\u0437\u0430\u044e\u0442\u0441\u044f: \u0435\u0433\u043e \u043c\u043e\u0436\u043d\u043e \u043e\u0442\u0434\u0430\u0432\u0430\u0442\u044c \u0434\u0440\u0443\u0433\u043e\u0439 \u043c\u043e\u0434\u0435\u043b\u0438 \u0434\u043b\u044f \u043d\u043e\u0440\u043c\u0430\u043b\u044c\u043d\u043e\u0433\u043e \u0440\u0430\u0437\u0431\u043e\u0440\u0430.")
     return "\n".join(lines)
 
 
@@ -149,19 +187,18 @@ async def cmd_report(message: Message) -> None:
     await ensure_user(user_id, message.from_user.username)
 
     data = await get_weekly_report_data(user_id, days=7)
-
-    if not data["sessions"] and not data["incubations"]:
-        await message.answer("\u0417\u0430 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 7 \u0434\u043d\u0435\u0439 \u0434\u0430\u043d\u043d\u044b\u0445 \u043d\u0435\u0442. \u041f\u043e\u0442\u0440\u0435\u043d\u0438\u0440\u0443\u0439\u0441\u044f \u0441\u043d\u0430\u0447\u0430\u043b\u0430 \U0001f60f")
+    sessions = _report_sessions(data)
+    if not sessions:
+        await message.answer("\u0417\u0430 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 7 \u0434\u043d\u0435\u0439 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445 \u0434\u043b\u044f \u043e\u0442\u0447\u0451\u0442\u0430.")
         return
 
     report_text = _build_report_text(data)
     filename = f"workout_report_{date.today().isoformat()}.txt"
-    doc = BufferedInputFile(report_text.encode("utf-8"), filename=filename)
+    doc = BufferedInputFile(report_text.encode("utf-8-sig"), filename=filename)
 
     await message.answer_document(
         doc,
         caption=(
-            "\u0422\u0432\u043e\u0439 \u043e\u0442\u0447\u0451\u0442 \u0437\u0430 \u043d\u0435\u0434\u0435\u043b\u044e.\n\n"
-            "\u0422\u0435\u043f\u0435\u0440\u044c \u043e\u0442\u0432\u0435\u0442\u044b \u0432 \u0444\u0430\u0439\u043b\u0435 \u043d\u0435 \u0440\u0435\u0436\u0443\u0442\u0441\u044f \u043c\u043d\u043e\u0433\u043e\u0442\u043e\u0447\u0438\u0435\u043c, \u0442\u0430\u043a \u0447\u0442\u043e \u0435\u0433\u043e \u043c\u043e\u0436\u043d\u043e \u043d\u043e\u0440\u043c\u0430\u043b\u044c\u043d\u043e \u0430\u043d\u0430\u043b\u0438\u0437\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u0434\u0430\u043b\u044c\u0448\u0435."
+            "\u041a\u0440\u0430\u0442\u043a\u0438\u0439 \u043e\u0442\u0447\u0451\u0442: \u0434\u0430\u0442\u0430, \u0437\u0430\u0434\u0430\u043d\u0438\u0435, \u0432\u0430\u0448 \u043e\u0442\u0432\u0435\u0442, \u043e\u0442\u0432\u0435\u0442 \u0431\u043e\u0442\u0430, \u0430\u043f\u0435\u043b\u043b\u044f\u0446\u0438\u044f \u0438 \u0440\u0435\u0448\u0435\u043d\u0438\u0435 \u043f\u043e \u043d\u0435\u0439."
         ),
     )

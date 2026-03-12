@@ -93,6 +93,7 @@ async def save_response(
     llm_score: int,
     user_difficulty: str,
     response_time_sec: int,
+    llm_feedback: str | None = None,
     initial_llm_score: int | None = None,
     appeal_text: str | None = None,
     appeal_feedback: str | None = None,
@@ -105,18 +106,20 @@ async def save_response(
             session_id,
             user_response,
             llm_score,
+            llm_feedback,
             user_difficulty,
             response_time_sec,
             initial_llm_score,
             appeal_text,
             appeal_feedback,
             appeal_decision
-        ) VALUES (?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)
         """,
         (
             session_id,
             user_response,
             llm_score,
+            llm_feedback,
             user_difficulty,
             response_time_sec,
             initial_llm_score,
@@ -317,8 +320,8 @@ async def get_weekly_report_data(user_id: int, days: int = 7) -> dict:
     async with db.execute(
         """
         SELECT s.date, s.mode, s.exercise_type, s.exercise_level,
-               r.user_response, r.llm_score, r.user_difficulty, r.response_time_sec,
-               r.initial_llm_score, r.appeal_decision
+               r.user_response, r.llm_score, r.llm_feedback, r.user_difficulty, r.response_time_sec,
+               r.initial_llm_score, r.appeal_text, r.appeal_feedback, r.appeal_decision
         FROM sessions s
         LEFT JOIN responses r ON r.session_id = s.id
         WHERE s.user_id = ? AND s.date >= ?

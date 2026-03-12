@@ -1,4 +1,4 @@
-﻿"""Enhanced session router with focus mode, appeals, round two, and concrete feedback."""
+"""Enhanced session router with focus mode, appeals, round two, and concrete feedback."""
 import logging
 import time
 
@@ -612,6 +612,7 @@ async def receive_difficulty(callback: CallbackQuery, state: FSMContext) -> None
         session_id=data["session_id"],
         user_response=data.get("pending_response", ""),
         llm_score=score,
+        llm_feedback=data["pending_eval_result"].get("feedback_text", ""),
         user_difficulty=difficulty,
         response_time_sec=data.get("pending_elapsed", 0),
         initial_llm_score=data.get("pending_initial_score"),
